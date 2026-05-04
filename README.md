@@ -1,4 +1,4 @@
-# Evaluating batters in cricket (Markov chain & survival analysis)
+# Evaluating Batters in Cricket Using Markov Chain Models and Survival Analysis
 
 ## Shiny dashboard (Python)
 
