@@ -1,0 +1,14 @@
+# --- Python (Shiny dashboard) — run: pip install -r requirements.txt
+pandas>=2.0
+numpy>=1.24
+plotly>=5.18
+shiny>=1.0
+shinywidgets>=0.3
+
+# --- R / R Markdown (Rmd_scripts/) — not installed by pip. In R, run:
+#   install.packages(c("dplyr", "tidyr", "stringr", "ggplot2", "gt", "purrr", "tibble", "survival", "survminer", "readr", "nnet", "zoo"))
+# Packages used:
+#   markov_chain_run_expectation_model_final.Rmd, markov_chain_win_probability_model_final.Rmd:
+#     dplyr, tidyr, stringr, ggplot2, gt (run expectation only)
+#   survival_analysis_final.Rmd:
+#     dplyr, purrr, tibble, stringr, tidyr, survival, survminer, readr, nnet, zoo
