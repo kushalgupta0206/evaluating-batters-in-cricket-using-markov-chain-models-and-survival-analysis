@@ -1,0 +1,261 @@
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(gt)
+```
+
+```{r}
+data <- read.csv("../data/ball_by_ball_ipl_2008_2023.csv") %>% 
+  group_by(Match.ID) %>% 
+  filter(Innings == 1) %>% 
+  mutate(Total.Balls.Bowled = ((Over-1)*6 + Ball),
+         Total.Balls.Bowled = sprintf("%03d",Total.Balls.Bowled),
+         Innings.Wickets = sprintf("%02d",Innings.Wickets),
+         Batter.Runs = sprintf("%01d",Batter.Runs),
+         Post.State = paste0(Total.Balls.Bowled,Innings.Wickets,Batter.Runs),
+         Post.State = if_else(str_detect(Extra.Type, "noballs") | str_detect(Extra.Type, "wides"), 
+                              paste0(Post.State, "1"), paste0(Post.State, "0")),
+         Prev.State = lag(Post.State),
+         Prev.State = ifelse(is.na(Prev.State), "0000000", Prev.State),
+         Ball.Count = as.numeric(substring(Post.State, 1, 3)),
+         Stage = ifelse(Ball.Count<37, 1, ifelse(Ball.Count > 84, 3, 2)),
+         Event = paste0(Wicket,substring(Post.State, 6,7),Stage)) %>% 
+  ungroup() %>% 
+  select(Match.ID, Batter, Total.Balls.Bowled, Innings.Wickets, Batter.Runs, Prev.State, Post.State,  
+         Stage,Event)
+```
+
+```{r}
+abrupt_end_row <- data.frame(
+  Match.ID = 548307,
+  Batter = "Retired Hurt",
+  Total.Balls.Bowled = "073",
+  Innings.Wickets = "10",
+  Batter.Runs = "0",
+  Prev.State = "0720910",
+  Post.State = "0731000",
+  Stage = 2,
+  Event = "1002")
+
+data_added <- data %>% 
+  bind_rows(abrupt_end_row)
+```
+
+```{r}
+final_data <- data_added %>% 
+  group_by(Event) %>%
+  mutate(Event.Count = n()) %>%
+  ungroup() %>%
+  group_by(Stage) %>% 
+  mutate(Total.Count = n()) %>% 
+  ungroup() %>% 
+  mutate(Event.Prob = Event.Count / Total.Count) %>% 
+  select(Match.ID, Batter, Total.Balls.Bowled, Innings.Wickets, Batter.Runs, Prev.State, Post.State, Event, 
+         Event.Prob)
+```
+
+```{r}
+transition_prob <- final_data %>% 
+  distinct(Prev.State, Post.State, Event, Event.Prob) 
+```
+
+```{r}
+first_part <- sprintf("%03d", 0:120) 
+second_part <- sprintf("%02d", 0:10)  
+third_part <- sprintf("%01d", 0:6)
+fourth_part <- sprintf("%01d", 0:1)
+
+terminal_states <- expand.grid(First = first_part, Second = second_part, Third = third_part, 
+                               Fourth = fourth_part) %>% 
+  mutate(state = paste0(First,Second,Third,Fourth),
+         terminal = ifelse((First == "120" & Fourth == "0") | Second == "10", 1, 0)) %>% 
+  select(state, terminal)
+```
+
+```{r}
+transition_prob_with_reward <- transition_prob %>% 
+  mutate(reward = as.integer(substring(Post.State, 6,6)))
+```
+
+```{r}
+value_initial <- terminal_states %>% 
+  mutate(value = 0) %>% 
+  select(state, value)
+```
+
+```{r}
+value_terminal <- value_initial %>% 
+  left_join(terminal_states, by="state") %>% 
+  filter(terminal == 1) %>% 
+  select(state, value)
+```
+
+```{r}
+value_previous <- value_initial
+max_delta <- Inf
+threshold <- 1e-9
+count = 0
+
+while(max_delta > threshold) { 
+
+  value <- transition_prob_with_reward %>% 
+    left_join(value_previous, by = c("Post.State" = "state")) %>% 
+    group_by(state = Prev.State) %>% 
+    summarize(value = weighted.mean(reward + value, w = Event.Prob)) %>% 
+    bind_rows(value_terminal)
+
+  max_delta <- value_previous %>% 
+    inner_join(value, by = "state", suffix = c("_before", "_after")) %>% 
+    summarize(max_delta = max(abs(value_before - value_after))) %>% 
+    with(max_delta)     
+  count = count + 1
+  print(max_delta)   
+  print(count)
+  value_previous <- value }
+
+value
+
+```
+
+```{r}
+state_analysis <- final_data %>% 
+  left_join(value, by = c("Prev.State" = "state")) %>% 
+  rename(exp_runs_prev = value) %>% 
+  left_join(value, by = c("Post.State" = "state")) %>% 
+  rename(exp_runs_post = value) %>%
+  mutate(
+    Batter.Runs = as.numeric(as.character(Batter.Runs)),
+    exp_runs_prev = as.numeric(exp_runs_prev),
+    exp_runs_post = as.numeric(exp_runs_post),
+    ball_count = as.numeric(substring(Post.State, 1, 3)),
+    wicket_event = ifelse(substring(Event, 1, 1) == "1", 1, 0),
+    simple_event = ifelse(wicket_event == 1, "Wicket", Batter.Runs),
+    stage = ifelse(ball_count<37, 1, ifelse(ball_count > 83, 3, 2)),
+    value_diff = exp_runs_post - exp_runs_prev + Batter.Runs,
+  ) %>% 
+  group_by(stage, simple_event) %>% 
+  summarise(avg_value_diff = mean(value_diff)) %>% 
+  filter(simple_event!="3" & simple_event!="5")
+```
+
+```{r}
+ggplot(state_analysis %>% 
+         mutate(
+           stage_name = case_when(
+             stage == 1 ~ "First: 1 - 36",
+             stage == 2 ~ "Second: 37 - 84",
+             stage == 3 ~ "Third: 85 - 120",
+           ),
+           stage_name = factor(stage_name)
+         ), aes(x = factor(simple_event), y = avg_value_diff, fill = factor(stage))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Average Difference in Expected Runs for Each Event Across Different Stages",
+    x = "Event",
+    y = "Average Expected Runs Difference",
+    fill = "Stage"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 13)
+  )
+  
+```
+
+
+```{r}
+batter_summary <- final_data %>% 
+  left_join(value, by = c("Prev.State" = "state")) %>% 
+  rename(exp_runs_prev = value) %>% 
+  left_join(value, by = c("Post.State" = "state")) %>% 
+  rename(exp_runs_post = value) %>%
+  mutate(
+    Batter.Runs = as.numeric(as.character(Batter.Runs)),
+    exp_runs_prev = as.numeric(exp_runs_prev),
+    exp_runs_post = as.numeric(exp_runs_post)
+  ) %>% 
+  mutate(
+   Match.Stage = case_when(
+      as.numeric(Total.Balls.Bowled) <= 36 ~ "start",
+      as.numeric(Total.Balls.Bowled) >= 37 & as.numeric(Total.Balls.Bowled) <= 84 ~ "middle",
+      as.numeric(Total.Balls.Bowled) >= 85 ~ "end",
+      TRUE ~ "unknown"
+    )    
+  ) %>% 
+  group_by(Match.ID, Batter) %>% 
+  mutate(
+    Entry.Total.Ball.Bowled = first(as.numeric(substring(Prev.State, 1, 3)))
+  ) %>% 
+  mutate(
+    Entry.Stage = case_when(
+      Entry.Total.Ball.Bowled <= 36 ~ "start",
+      Entry.Total.Ball.Bowled >= 37 & Entry.Total.Ball.Bowled <= 84 ~ "middle",
+      Entry.Total.Ball.Bowled >= 85 ~ "end",
+      TRUE ~ "unknown"
+    )
+  ) %>% 
+  ungroup() %>% 
+  group_by(Batter, Entry.Stage, Match.Stage) %>% 
+  summarize(n_balls = n(),
+            n_matches = n_distinct(Match.ID),
+            total_exp_runs_diff = sum(Batter.Runs + exp_runs_post - exp_runs_prev, na.rm = TRUE),
+            avg_exp_runs_diff = mean(Batter.Runs + exp_runs_post - exp_runs_prev, na.rm = TRUE),
+            .groups = "drop") %>% 
+  arrange(-avg_exp_runs_diff) %>% 
+  select(Batter, Entry.Stage,Match.Stage, n_matches, n_balls, total_exp_runs_diff, avg_exp_runs_diff)
+
+print(batter_summary)
+```
+
+```{r}
+batter_summary %>% 
+  filter(Entry.Stage == "end" & Match.Stage == "end") %>%
+  filter(n_balls > 200) %>% 
+  arrange(-avg_exp_runs_diff) %>% 
+  select(-c(Entry.Stage, Match.Stage)) %>% 
+  head(20)
+```
+
+```{r}
+selected_table <- batter_summary %>% 
+  filter(Entry.Stage == "end" & Match.Stage == "end") %>%
+  filter(n_balls > 150) %>% 
+  arrange(-avg_exp_runs_diff) %>% 
+  select(-c(Entry.Stage, Match.Stage))
+
+selected_table %>%
+  gt() %>%
+  tab_header(
+    title = md("**Top 10 'End' Batters by Value Added (VA)**"),
+    subtitle = "Minimum 150 balls faced."
+  ) %>%
+  cols_label(
+    Batter = "Player",
+    n_matches = "Matches",
+    n_balls = "Balls",
+    total_exp_runs_diff = "Total VA",
+    avg_exp_runs_diff = "Avg VA"
+  ) %>%
+  fmt_number(
+    columns = c(total_exp_runs_diff, avg_exp_runs_diff),
+    decimals = 3
+  ) %>%
+  data_color(
+    columns = avg_exp_runs_diff,
+    colors = scales::col_numeric(
+      palette = c("red", "white", "green"),
+      domain = NULL
+    )
+  ) %>%
+  tab_options(
+    table.width = pct(80),
+    column_labels.font.weight = "bold"
+  )
+```
+
+
+
+

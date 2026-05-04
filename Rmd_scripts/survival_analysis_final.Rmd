@@ -1,0 +1,124 @@
+
+```{r}
+library(dplyr)
+library(purrr)
+library(tibble)
+library(stringr)
+library(tidyr)
+library(survival)
+library(survminer)
+library(readr)
+library(nnet)
+library(zoo)
+```
+
+```{r}
+ball_by_ball_ipl <- read.csv("../data/ball_by_ball_ipl_2008_2023.csv")
+```
+
+```{r}
+ball_by_ball_refined <- ball_by_ball_ipl %>% 
+  group_by(Match.ID, Innings) %>% 
+  mutate(
+    Innings.Balls = 120 - Balls.Remaining,
+    Innings.Balls.Prev = lag(Innings.Balls, default = 0),
+    Innings.Runs.Prev = lag(Innings.Runs, default = 0),
+    Innings.Wickets.Prev = lag(Innings.Wickets, default = 0),
+    Innings.Balls.Remaining.Prev = lag(Balls.Remaining, default = 120),
+    Innings.Runs.Remaining.Prev = lag(Runs.to.Get, default = first(Target.Score)),
+    Innings.Wickets.Remaining.Prev = 10 - Innings.Wickets.Prev,
+    Innings.Runs.L3 = lag(rollapplyr(Runs.From.Ball, 3, sum, fill = 0), default = 0),
+    Innings.Dots.L3 = lag(rollapplyr(ifelse(Runs.From.Ball == 0, 1, 0), 3, sum, fill = 0), default = 0)
+  ) %>% 
+  ungroup() %>% 
+  rename(Innings.Balls.Post = Innings.Balls,
+         Innings.Runs.Post = Innings.Runs,
+         Innings.Wickets.Post = Innings.Wickets) %>% 
+  group_by(Match.ID, Innings) %>% 
+  mutate(
+    p_strikers = pmin(Batter, Non.Striker),
+    p_nonstrikers = pmax(Batter, Non.Striker),
+    partnership_id = paste(Match.ID, Innings, p_strikers, p_nonstrikers, sep = "_")
+  ) %>%
+  group_by(partnership_id) %>%
+  mutate(
+    Partnership.Runs.Prev = lag(cumsum(Runs.From.Ball), default = 0),
+    Partnership.Balls.Prev = lag(cumsum(Valid.Ball), default = 0)
+  ) %>%
+  ungroup() %>% 
+  group_by(Match.ID, Innings, Batter) %>% 
+  mutate(
+    Total.Exposure.Stop = row_number(),
+    Total.Exposure.Start = Total.Exposure.Stop - 1,
+    Entry.Innings.Balls = first(Innings.Balls.Prev),
+    Total.Batter.Runs.Post = cumsum(Batter.Runs),
+    Total.Batter.Runs.Prev = lag(Total.Batter.Runs.Post, default = 0),
+    Total.Batter.Runs.L3 = lag(rollapplyr(Batter.Runs, 3, sum, fill = 0), default = 0),
+    Total.Batter.Dots.L3 = lag(rollapplyr(ifelse(Batter.Runs == 0, 1, 0), 3, sum, fill = 0), default = 0),
+    Total.Batter.Balls.Prev = lag(Batter.Balls.Faced, default = 0),
+    Is.Out = if_else(row_number() == n() & Wicket == 1, 1, 0)
+  ) %>% 
+  mutate(
+    Stage = case_when(
+      Entry.Innings.Balls <= 36 ~ "start",
+      Entry.Innings.Balls > 36 & Entry.Innings.Balls <= 84 ~ "middle",
+      Entry.Innings.Balls > 84 ~ "end",
+      TRUE ~ "unknown"
+    ),
+    Stage = factor(Stage, levels = c("start", "middle", "end"))
+  ) %>% 
+  group_by(Match.ID, Innings, Batter, Bowler) %>% 
+  mutate(
+    Total.Batter.Bowler.Balls.Prev = lag(cumsum(Valid.Ball), default = 0),
+    Total.Batter.Bowler.Runs.Prev = lag(cumsum(Batter.Runs), default =  0),
+    Batter.SR = Total.Batter.Runs.Prev/Total.Batter.Balls.Prev,
+    Batter.SR = if_else(is.na(Batter.SR) | !is.finite(Batter.SR), 1, Batter.SR),
+    Team.RR = Innings.Runs.Prev/Innings.Balls.Prev, 
+    Team.RR = if_else(is.na(Team.RR) | !is.finite(Team.RR), 1, Team.RR),
+    Batter.Bowler.SR = Total.Batter.Bowler.Runs.Prev/Total.Batter.Bowler.Balls.Prev,
+    Batter.Bowler.SR = if_else(is.na(Batter.Bowler.SR) | !is.finite(Batter.Bowler.SR), 1, Batter.Bowler.SR)
+  ) %>% 
+  ungroup() %>%
+  select(Match.ID, Innings, Batter, Non.Striker, Total.Exposure.Start, Total.Exposure.Stop, 
+         Innings.Balls.Prev, Innings.Runs.Prev, Innings.Wickets.Prev, Stage,
+         Innings.Runs.L3, Innings.Dots.L3, Partnership.Runs.Prev, Partnership.Balls.Prev, 
+         Total.Batter.Runs.Prev, Total.Batter.Runs.L3, Total.Batter.Dots.L3, Total.Batter.Balls.Prev, 
+         Batter.SR, Team.RR, Batter.Bowler.SR,
+         Total.Batter.Bowler.Balls.Prev, Total.Batter.Bowler.Runs.Prev, Is.Out)
+```
+
+```{r}
+cox_model_1 <- coxph(Surv(Total.Exposure.Start, Total.Exposure.Stop, Is.Out) ~ 
+                       Innings.Runs.Prev +
+                       Innings.Wickets.Prev +
+                       Stage + 
+                       Batter.SR +
+                       Team.RR +
+                       Total.Batter.Bowler.Balls.Prev +
+                       Total.Batter.Dots.L3, 
+                     data = ball_by_ball_refined)
+```
+
+```{r}
+car::vif(cox_model_1)
+```
+
+```{r}
+summary(cox_model_1)
+```
+
+```{r}
+ggsurvplot(
+  survfit(cox_model_1), 
+  data = ball_by_ball_refined,
+  conf.int = TRUE, 
+  ggtheme = theme_minimal(),
+  title = "T20 Batter Survival Probability over Time",
+  font.title = c("bold"),
+  xlab = "Time (Balls Faced)",
+  ylab = "Survival Probability",
+  legend = "none"
+)
+```
+
+
